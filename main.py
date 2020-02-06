@@ -57,8 +57,7 @@ env.seed(args.seed)
 agent = SAC(env.observation_space.shape[0], env.action_space, args)
 
 #TesnorboardX
-writer = SummaryWriter(logdir='runs/{}_SAC_{}_{}_{}'.format(datetime.datetime.now().strftime("%Y-%m-%d_%H-%M-%S"), args.env_name,
-                                                             args.policy, "autotune" if args.automatic_entropy_tuning else ""))
+writer = SummaryWriter('runs/{}_SAC_{}_{}_{}'.format(datetime.datetime.now().strftime("%Y-%m-%d_%H-%M-%S"), args.env_name, args.policy, "autotune" if args.automatic_entropy_tuning else ""))
 
 # Memory
 memory = ReplayMemory(args.replay_size)
@@ -119,7 +118,7 @@ for i_episode in itertools.count(1):
             episode_reward = 0
             done = False
             while not done:
-                action = agent.select_action(state, eval=True)
+                action = agent.select_action(state, evaluate=True)
 
                 next_state, reward, done, _ = env.step(action)
                 episode_reward += reward
