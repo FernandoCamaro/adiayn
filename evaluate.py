@@ -5,7 +5,7 @@ import torch
 import numpy as np
 from matplotlib import animation
 
-actor_path = "models/sac_actor_Pendulum-v0_diayn_1100.pth" # 700
+actor_path = "models/sac_actor_Pendulum-v0_adiayn_1_900.pth" # 700
 env_name = 'Pendulum-v0'
 cuda = True
 seed = 123456
@@ -13,11 +13,11 @@ env = gym.make(env_name)
 env.seed(seed)
 env._max_episode_steps = 500
 num_skills = 2
-skill = 0
+skill = 1
 
 num_inputs = env.observation_space.shape[0]
 action_space = env.action_space
-hidden_size = 256
+hidden_size = 64#256
 device = torch.device("cuda" if cuda else "cpu")
 policy = GaussianPolicy(num_inputs+num_skills, action_space.shape[0], hidden_size, action_space).to(device)
 policy.load_state_dict(torch.load(actor_path))

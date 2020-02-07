@@ -4,7 +4,10 @@ import gym
 import numpy as np
 import itertools
 import torch
+import torch.nn.functional as F
+from torch.optim import Adam
 from sac import SAC
+from model import Discriminator
 from tensorboardX import SummaryWriter
 from replay_memory import ReplayMemory
 
@@ -57,8 +60,13 @@ torch.manual_seed(args.seed)
 np.random.seed(args.seed)
 env.seed(args.seed)
 
-# Agent
-agent = SAC(env.observation_space.shape[0], env.action_space, args)
+# Agents
+agent0 = SAC(env.observation_space.shape[0], env.action_space, args, handicaped=False)
+agent1 = SAC(env.observation_space.shape[0], env.action_space, args, handicaped=True)
+
+# Discriminator
+discriminator = Discriminator(env.observation_space.shape[0], int(args.num_skills*2), args.hidden_size).to(agent0.device)
+discriminator_optim = Adam(discriminator.parameters(), lr=args.lr)
 
 #TesnorboardX
 writer = SummaryWriter('runs/{}_SAC_{}_{}_{}'.format(datetime.datetime.now().strftime("%Y-%m-%d_%H-%M-%S"), args.env_name, args.policy, "autotune" if args.automatic_entropy_tuning else ""))
@@ -75,11 +83,15 @@ for i_episode in itertools.count(1):
     episode_steps = 0
     done = False
     state = env.reset()
+    # sample skill
     if args.diayn:
         skill = np.random.randint(args.num_skills)
         z_one_hot = np.zeros(args.num_skills)
         z_one_hot[skill] = 1.
         state = np.concatenate((state,z_one_hot))
+    # sample agent
+    agent_id = np.random.randint(2)
+    agent = agent0 if agent_id == 0 else agent1
     while not done:
         if args.start_steps > total_numsteps:
             action = env.action_space.sample()  # Sample random action
@@ -89,16 +101,30 @@ for i_episode in itertools.count(1):
         if len(memory) > args.batch_size:
             # Number of updates per step in environment
             for i in range(args.updates_per_step):
-                # Update parameters of all the networks
-                critic_1_loss, critic_2_loss, policy_loss, ent_loss, alpha, discr_loss = agent.update_parameters(memory, args.batch_size, updates)
+                # Update parameters the two agents
+                critic_1_loss_0, critic_2_loss_0, policy_loss_0, ent_loss_0, alpha_0 = agent0.update_parameters(memory, args.batch_size, updates, discriminator)
+                critic_1_loss_1, critic_2_loss_1, policy_loss_1, ent_loss_1, alpha_1 = agent1.update_parameters(memory, args.batch_size, updates, discriminator)
                 
-                writer.add_scalar('loss/critic_1', critic_1_loss, updates)
-                writer.add_scalar('loss/critic_2', critic_2_loss, updates)
-                writer.add_scalar('loss/policy', policy_loss, updates)
-                writer.add_scalar('loss/entropy_loss', ent_loss, updates)
-                writer.add_scalar('entropy_temprature/alpha', alpha, updates)
+                # update discriminator
                 if args.diayn:
-                    writer.add_scalar('loss/discriminator_loss', discr_loss, updates)
+                    _, _, _, next_state, _, skills, agent_ids = memory.sample(batch_size=args.batch_size)
+                    next_state = torch.FloatTensor(next_state).to(agent1.device)
+                    next_state_for_disc = next_state[:,0:-args.num_skills]
+                    skills     = torch.LongTensor(skills + args.num_skills*agent_ids ).to(agent1.device)
+                    logits     = discriminator(next_state_for_disc) 
+                    discriminator_loss       = F.cross_entropy(logits, skills)
+                    
+                    discriminator_optim.zero_grad()
+                    discriminator_loss.backward()
+                    discriminator_optim.step()
+
+                writer.add_scalar('loss/critic_1_0', critic_1_loss_0, updates)
+                writer.add_scalar('loss/critic_2_0', critic_2_loss_0, updates)
+                writer.add_scalar('loss/policy_0', policy_loss_0, updates)
+                writer.add_scalar('loss/entropy_loss_0', ent_loss_0, updates)
+                writer.add_scalar('entropy_temprature/alpha_0', alpha_0, updates)
+                if args.diayn:
+                    writer.add_scalar('loss/discriminator_loss', discriminator_loss, updates)
                 updates += 1
 
         next_state, reward, done, _ = env.step(action) # Step
@@ -111,7 +137,7 @@ for i_episode in itertools.count(1):
         mask = 1 if episode_steps == env._max_episode_steps else float(not done)
         if args.diayn:
             next_state = np.concatenate((next_state,z_one_hot))
-            memory.push(state, action, reward, next_state, mask, skill)
+            memory.push(state, action, reward, next_state, mask, skill, agent_id)
         else:    
             memory.push(state, action, reward, next_state, mask) # Append transition to memory
         
@@ -125,7 +151,8 @@ for i_episode in itertools.count(1):
     print("Episode: {}, skill: {}, total numsteps: {}, episode steps: {}, reward: {}".format(i_episode, skill_str, total_numsteps, episode_steps, round(episode_reward, 2)))
 
     if i_episode % 100 == 0:
-        agent.save_model(args.env_name,'diayn_'+str(i_episode))
+        agent0.save_model(args.env_name,'adiayn_0_'+str(i_episode))
+        agent1.save_model(args.env_name,'adiayn_1_'+str(i_episode))
 
 env.close()
 

@@ -4,11 +4,11 @@ import torch.nn.functional as F
 from torch.optim import Adam
 import numpy as np
 from utils import soft_update, hard_update
-from model import GaussianPolicy, QNetwork, DeterministicPolicy, Discriminator
+from model import GaussianPolicy, QNetwork, DeterministicPolicy
 
 
 class SAC(object):
-    def __init__(self, num_inputs, action_space, args):
+    def __init__(self, num_inputs, action_space, args, handicaped=False):
 
         self.gamma = args.gamma
         self.tau = args.tau
@@ -30,6 +30,7 @@ class SAC(object):
         self.critic_target = QNetwork(num_inputs+self.num_skills, action_space.shape[0], args.hidden_size).to(self.device)
         hard_update(self.critic_target, self.critic)
 
+        policy_hidden_size = args.hidden_size if not handicaped else int(args.hidden_size/4)
         if self.policy_type == "Gaussian":
             # Target Entropy = −dim(A) (e.g. , -6 for HalfCheetah-v2) as given in the paper
             if self.automatic_entropy_tuning is True:
@@ -37,18 +38,14 @@ class SAC(object):
                 self.log_alpha = torch.zeros(1, requires_grad=True, device=self.device)
                 self.alpha_optim = Adam([self.log_alpha], lr=args.lr)
 
-            self.policy = GaussianPolicy(num_inputs+self.num_skills, action_space.shape[0], args.hidden_size, action_space).to(self.device)
+            self.policy = GaussianPolicy(num_inputs+self.num_skills, action_space.shape[0], policy_hidden_size, action_space).to(self.device)
             self.policy_optim = Adam(self.policy.parameters(), lr=args.lr)
 
         else:
             self.alpha = 0
             self.automatic_entropy_tuning = False
-            self.policy = DeterministicPolicy(num_inputs+self.num_skills, action_space.shape[0], args.hidden_size, action_space).to(self.device)
+            self.policy = DeterministicPolicy(num_inputs+self.num_skills, action_space.shape[0], policy_hidden_size, action_space).to(self.device)
             self.policy_optim = Adam(self.policy.parameters(), lr=args.lr)
-
-        if self.diayn:
-            self.discriminator = Discriminator(num_inputs, self.num_skills, args.hidden_size).to(self.device)
-            self.discriminator_optim = Adam(self.discriminator.parameters(), lr=args.lr)
 
     def select_action(self, state, evaluate=False):
         state = torch.FloatTensor(state).to(self.device).unsqueeze(0)
@@ -58,9 +55,9 @@ class SAC(object):
             _, _, action = self.policy.sample(state)
         return action.detach().cpu().numpy()[0]
 
-    def update_parameters(self, memory, batch_size, updates):
+    def update_parameters(self, memory, batch_size, updates, discriminator):
         # Sample a batch from memory to update the SAC parameters: critic and actor
-        state_batch, action_batch, reward_batch, next_state_batch, mask_batch, skills = memory.sample(batch_size=batch_size)
+        state_batch, action_batch, reward_batch, next_state_batch, mask_batch, skills, _ = memory.sample(batch_size=batch_size)
 
         state_batch = torch.FloatTensor(state_batch).to(self.device)
         next_state_batch = torch.FloatTensor(next_state_batch).to(self.device)
@@ -70,8 +67,8 @@ class SAC(object):
         else:
             skills     = torch.LongTensor(skills).to(self.device)
             next_state_for_disc = next_state_batch[:,0:-self.num_skills]
-            logits     = self.discriminator(next_state_for_disc)
-            reward_batch     = -F.cross_entropy(logits, skills, reduction='none') - np.log(1/self.num_skills + 1e-6)
+            logits     = discriminator(next_state_for_disc)
+            reward_batch     = -F.cross_entropy(logits, skills, reduction='none') - np.log(1/self.num_skills + 1e-6) -np.log(1/2. + 1E-6)
             reward_batch     = reward_batch.detach()
         mask_batch = torch.FloatTensor(mask_batch).to(self.device).unsqueeze(1)
 
@@ -120,23 +117,12 @@ class SAC(object):
         if updates % self.target_update_interval == 0:
             soft_update(self.critic_target, self.critic, self.tau)
 
-        # Update the discriminator
-        if self.diayn:
-            _, _, _, next_state, _, skills = memory.sample(batch_size=batch_size)
-            next_state = torch.FloatTensor(next_state).to(self.device)
-            next_state_for_disc = next_state[:,0:-self.num_skills]
-            skills     = torch.LongTensor(skills).to(self.device)
-            logits     = self.discriminator(next_state_for_disc) 
-            discriminator_loss       = F.cross_entropy(logits, skills)
-            
-            self.discriminator_optim.zero_grad()
-            discriminator_loss.backward()
-            self.discriminator_optim.step()
+        
 
-        return qf1_loss.item(), qf2_loss.item(), policy_loss.item(), alpha_loss.item(), alpha_tlogs.item(), discriminator_loss.item() if self.diayn else None
+        return qf1_loss.item(), qf2_loss.item(), policy_loss.item(), alpha_loss.item(), alpha_tlogs.item() if self.diayn else None
 
     # Save model parameters
-    def save_model(self, env_name, suffix="", actor_path=None, critic_path=None, discriminator_path=None):
+    def save_model(self, env_name, suffix="", actor_path=None, critic_path=None):
         if not os.path.exists('models/'):
             os.makedirs('models/')
 
@@ -144,13 +130,10 @@ class SAC(object):
             actor_path = "models/sac_actor_{}_{}.pth".format(env_name, suffix)
         if critic_path is None:
             critic_path = "models/sac_critic_{}_{}.pth".format(env_name, suffix)
-        if discriminator_path is None:
-            discriminator_path = "models/sac_discriminator_{}_{}.pth".format(env_name, suffix)
+        
         print('Saving models to {} and {}'.format(actor_path, critic_path))
         torch.save(self.policy.state_dict(), actor_path)
         torch.save(self.critic.state_dict(), critic_path)
-        if self.diayn:
-            torch.save(self.discriminator.state_dict(), discriminator_path)
 
 
     # Load model parameters
