@@ -150,3 +150,22 @@ class DeterministicPolicy(nn.Module):
         self.action_bias = self.action_bias.to(device)
         self.noise = self.noise.to(device)
         return super(DeterministicPolicy, self).to(device)
+
+class Discriminator(nn.Module):
+    def __init__(self, num_inputs, num_skills, hidden_size, init_w=3e-3):
+        super(Discriminator, self).__init__()
+         
+        self.linear1 = nn.Linear(num_inputs, hidden_size)
+        self.linear2 = nn.Linear(hidden_size, hidden_size)
+        
+        self.linear3 = nn.Linear(hidden_size, num_skills)
+        self.linear3.weight.data.uniform_(-init_w, init_w)
+        self.linear3.bias.data.uniform_(-init_w, init_w)
+        
+        
+    def forward(self, state):
+        x = F.relu(self.linear1(state))
+        x = F.relu(self.linear2(x))
+        x = self.linear3(x)
+        
+        return x

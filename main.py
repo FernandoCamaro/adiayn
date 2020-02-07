@@ -44,6 +44,10 @@ parser.add_argument('--replay_size', type=int, default=1000000, metavar='N',
                     help='size of replay buffer (default: 10000000)')
 parser.add_argument('--cuda', action="store_true",
                     help='run on CUDA (default: False)')
+parser.add_argument('--diayn', action="store_true",
+                    help='do diayn (default: False)')
+parser.add_argument('--num_skills', type=int, default=2, metavar='N',
+                    help='number of skills for diayn (default: 2)')
 args = parser.parse_args()
 
 # Environment
@@ -71,7 +75,11 @@ for i_episode in itertools.count(1):
     episode_steps = 0
     done = False
     state = env.reset()
-
+    if args.diayn:
+        skill = np.random.randint(args.num_skills)
+        z_one_hot = np.zeros(args.num_skills)
+        z_one_hot[skill] = 1.
+        state = np.concatenate((state,z_one_hot))
     while not done:
         if args.start_steps > total_numsteps:
             action = env.action_space.sample()  # Sample random action
@@ -82,13 +90,15 @@ for i_episode in itertools.count(1):
             # Number of updates per step in environment
             for i in range(args.updates_per_step):
                 # Update parameters of all the networks
-                critic_1_loss, critic_2_loss, policy_loss, ent_loss, alpha = agent.update_parameters(memory, args.batch_size, updates)
-
+                critic_1_loss, critic_2_loss, policy_loss, ent_loss, alpha, discr_loss = agent.update_parameters(memory, args.batch_size, updates)
+                
                 writer.add_scalar('loss/critic_1', critic_1_loss, updates)
                 writer.add_scalar('loss/critic_2', critic_2_loss, updates)
                 writer.add_scalar('loss/policy', policy_loss, updates)
                 writer.add_scalar('loss/entropy_loss', ent_loss, updates)
                 writer.add_scalar('entropy_temprature/alpha', alpha, updates)
+                if args.diayn:
+                    writer.add_scalar('loss/discriminator_loss', discr_loss, updates)
                 updates += 1
 
         next_state, reward, done, _ = env.step(action) # Step
@@ -99,41 +109,23 @@ for i_episode in itertools.count(1):
         # Ignore the "done" signal if it comes from hitting the time horizon.
         # (https://github.com/openai/spinningup/blob/master/spinup/algos/sac/sac.py)
         mask = 1 if episode_steps == env._max_episode_steps else float(not done)
-
-        memory.push(state, action, reward, next_state, mask) # Append transition to memory
-
+        if args.diayn:
+            next_state = np.concatenate((next_state,z_one_hot))
+            memory.push(state, action, reward, next_state, mask, skill)
+        else:    
+            memory.push(state, action, reward, next_state, mask) # Append transition to memory
+        
         state = next_state
 
     if total_numsteps > args.num_steps:
         break
+    
+    skill_str =  "" if not args.diayn else str(skill)
+    writer.add_scalar('reward/train_'+skill_str, episode_reward, i_episode)
+    print("Episode: {}, skill: {}, total numsteps: {}, episode steps: {}, reward: {}".format(i_episode, skill_str, total_numsteps, episode_steps, round(episode_reward, 2)))
 
-    writer.add_scalar('reward/train', episode_reward, i_episode)
-    print("Episode: {}, total numsteps: {}, episode steps: {}, reward: {}".format(i_episode, total_numsteps, episode_steps, round(episode_reward, 2)))
-
-    if i_episode % 10 == 0 and args.eval is True:
-        avg_reward = 0.
-        episodes = 10
-        for _  in range(episodes):
-            state = env.reset()
-            episode_reward = 0
-            done = False
-            while not done:
-                action = agent.select_action(state, evaluate=True)
-
-                next_state, reward, done, _ = env.step(action)
-                episode_reward += reward
-
-
-                state = next_state
-            avg_reward += episode_reward
-        avg_reward /= episodes
-
-
-        writer.add_scalar('avg_reward/test', avg_reward, i_episode)
-
-        print("----------------------------------------")
-        print("Test Episodes: {}, Avg. Reward: {}".format(episodes, round(avg_reward, 2)))
-        print("----------------------------------------")
+    if i_episode % 100 == 0:
+        agent.save_model(args.env_name,'diayn_'+str(i_episode))
 
 env.close()
 
