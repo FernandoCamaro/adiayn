@@ -30,7 +30,7 @@ class SAC(object):
         self.critic_target = QNetwork(num_inputs+self.num_skills, action_space.shape[0], args.hidden_size).to(self.device)
         hard_update(self.critic_target, self.critic)
 
-        policy_hidden_size = args.hidden_size if not handicaped else int(args.hidden_size/4)
+        policy_hidden_size = args.hidden_size if not handicaped else int(args.hidden_size/16)
         if self.policy_type == "Gaussian":
             # Target Entropy = −dim(A) (e.g. , -6 for HalfCheetah-v2) as given in the paper
             if self.automatic_entropy_tuning is True:
