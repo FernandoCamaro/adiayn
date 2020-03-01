@@ -89,10 +89,10 @@ for i_episode in itertools.count(1):
     episode_steps = 0
     done = False
     state = env.reset()
-    if pybullet_env:
-        pybullet.setRealTimeSimulation(1)
-        time.sleep(1)
-        pybullet.setRealTimeSimulation(0)
+    # if pybullet_env:
+    #     pybullet.setRealTimeSimulation(1)
+    #     time.sleep(1)
+    #     pybullet.setRealTimeSimulation(0)
     # sample skill
     if args.diayn:
         skill = np.random.randint(args.num_skills)
