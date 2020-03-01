@@ -165,6 +165,7 @@ for i_episode in itertools.count(1):
     skill_str =  "" if not args.diayn else str(skill)
     agent_id_str = "" if not args.diayn else str(agent_id)
     writer.add_scalar('reward/train_'+skill_str+'_'+agent_id_str, episode_reward, i_episode)
+    writer.add_scalar('episode_len/train_'+skill_str+'_'+agent_id_str, episode_steps, i_episode)
     print("Episode: {}, skill: {}, agent: {}, total numsteps: {}, episode steps: {}, reward: {}".format(i_episode, skill_str, agent_id_str, total_numsteps, episode_steps, round(episode_reward, 2)))
 
     if i_episode % 2000 == 0:
