@@ -56,6 +56,8 @@ parser.add_argument('--num_skills', type=int, default=2, metavar='N',
                     help='number of skills for diayn (default: 2)')
 parser.add_argument('--disc_start_epi', type=int, default=500, metavar='N',
                     help='episode in which the discriminator starts being trained (default: 500)')
+parser.add_argument('--max_episode_steps', type=int, default=300, metavar='N',
+                    help='maximum steps allowed in an episode (default: 300)')
 args = parser.parse_args()
 
 # Environment
@@ -102,7 +104,7 @@ for i_episode in itertools.count(1):
     # sample agent
     agent_id = np.random.randint(2)
     agent = agent0 if agent_id == 0 else agent1
-    while not done:
+    while (not done) and (episode_steps < args.max_episode_steps):
         if args.start_steps > total_numsteps:
             action = env.action_space.sample()  # Sample random action
         else:
@@ -145,7 +147,8 @@ for i_episode in itertools.count(1):
                 skills     = torch.LongTensor([skill]).to(agent1.device)
                 next_state_for_disc = torch.FloatTensor(next_state).unsqueeze(0).to(agent1.device)
                 logits     = discriminator(next_state_for_disc)
-                reward     = (-F.cross_entropy(logits, skills) - np.log(1/args.num_skills + 1e-6) -np.log(1/2. + 1E-6)).item()
+                # reward     = (-F.cross_entropy(logits, skills) - np.log(1/args.num_skills + 1e-6) -np.log(1/2. + 1E-6)).item()
+                reward = F.softmax(logits, dim=1).gather(dim=1, index=skills.view(-1,1)).item()
         episode_reward += reward
 
         # Ignore the "done" signal if it comes from hitting the time horizon.
