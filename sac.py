@@ -68,7 +68,8 @@ class SAC(object):
             skills     = torch.LongTensor(skills).to(self.device)
             next_state_for_disc = next_state_batch[:,0:-self.num_skills]
             logits     = discriminator(next_state_for_disc)
-            reward_batch     = -F.cross_entropy(logits, skills, reduction='none') - np.log(1/self.num_skills + 1e-6) -np.log(1/2. + 1E-6)
+            #reward_batch     = -F.cross_entropy(logits, skills, reduction='none') - np.log(1/self.num_skills + 1e-6) -np.log(1/2. + 1E-6)
+            reward_batch = F.softmax(logits, dim=1).gather(dim=1, index=skills.view(-1,1))
             reward_batch     = reward_batch.detach()
         mask_batch = torch.FloatTensor(mask_batch).to(self.device).unsqueeze(1)
 
