@@ -42,7 +42,7 @@ class NavigationEnv(gym.Env):
     def render(self, mode='human', close=False):
         # Render the environment to the screen
         obs = self._observation(render=True)
-        Image.fromarray(obs).show()
+        return Image.fromarray(obs)
 
     def _observation(self, render=False):
         img = Image.new(mode="RGB", size=[self.WIDTH, self.HEIGHT])
