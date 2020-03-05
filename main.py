@@ -13,10 +13,11 @@ from replay_memory import ReplayMemory
 import pybullet
 import pybullet_envs
 import time
+from envs.navigationEnv import NavigationEnv
 
 parser = argparse.ArgumentParser(description='PyTorch Soft Actor-Critic Args')
-parser.add_argument('--env-name', default="HalfCheetah-v2",
-                    help='Mujoco Gym environment (default: HalfCheetah-v2)')
+parser.add_argument('--env-name', default="2DNavigation",
+                    help='Environment (default: 2DNavigation)')
 parser.add_argument('--policy', default="Gaussian",
                     help='Policy Type: Gaussian | Deterministic (default: Gaussian)')
 parser.add_argument('--eval', type=bool, default=True,
@@ -61,19 +62,23 @@ parser.add_argument('--max_episode_steps', type=int, default=300, metavar='N',
 args = parser.parse_args()
 
 # Environment
-# env = NormalizedActions(gym.make(args.env_name))
-env = gym.make(args.env_name)
+env = NavigationEnv()
+width = env.observation_space.shape[0]
+height = env.observation_space.shape[1]
 torch.manual_seed(args.seed)
 np.random.seed(args.seed)
 env.seed(args.seed)
 pybullet_env = "Bullet" in args.env_name
 
 # Agents
-agent0 = SAC(env.observation_space.shape[0], env.action_space, args, handicaped=False)
-agent1 = SAC(env.observation_space.shape[0], env.action_space, args, handicaped=True)
+agent0 = SAC(width, height,env.action_space, args, handicaped=False)
+agent1 = SAC(width, height, env.action_space, args, handicaped=True)
 
 # Discriminator
-discriminator = Discriminator(env.observation_space.shape[0], int(args.num_skills*2), args.hidden_size).to(agent0.device)
+# TODO: remove hardcoded num_inputs for discriminator
+# TODO: num_agents should be handled properly once we know it works for the case of one agent in DIAYN.
+num_agents = 1
+discriminator = Discriminator( 256, int(args.num_skills*num_agents), args.hidden_size).to(agent0.device)
 discriminator_optim = Adam(discriminator.parameters(), lr=args.lr)
 
 #TesnorboardX
@@ -91,24 +96,18 @@ for i_episode in itertools.count(1):
     episode_steps = 0
     done = False
     state = env.reset()
-    # if pybullet_env:
-    #     pybullet.setRealTimeSimulation(1)
-    #     time.sleep(1)
-    #     pybullet.setRealTimeSimulation(0)
-    # sample skill
     if args.diayn:
         skill = np.random.randint(args.num_skills)
         z_one_hot = np.zeros(args.num_skills)
         z_one_hot[skill] = 1.
-        state = np.concatenate((state,z_one_hot))
     # sample agent
-    agent_id = np.random.randint(2)
+    agent_id = 0 #np.random.randint(2)
     agent = agent0 if agent_id == 0 else agent1
     while (not done) and (episode_steps < args.max_episode_steps):
         if args.start_steps > total_numsteps:
             action = env.action_space.sample()  # Sample random action
         else:
-            action = agent.select_action(state)  # Sample action from policy
+            action = agent.select_action(state) if not args.diayn else agent.select_action(state, z_one_hot)# Sample action from policy
 
         if len(memory) > args.batch_size:
             # Number of updates per step in environment
@@ -119,10 +118,12 @@ for i_episode in itertools.count(1):
                 
                 # update discriminator
                 if args.diayn and i_episode > args.disc_start_epi:
-                    _, _, _, next_state, _, skills, agent_ids = memory.sample(batch_size=args.batch_size)
-                    next_state = torch.FloatTensor(next_state).to(agent1.device)
-                    next_state_for_disc = next_state[:,0:-args.num_skills]
-                    skills     = torch.LongTensor(skills + args.num_skills*agent_ids ).to(agent1.device)
+                    _, _, _, next_state, _, skills, one_hot_skills, agent_ids = memory.sample(batch_size=args.batch_size)
+                    next_state = torch.FloatTensor(next_state).to(agent.device)
+                    one_hot_skills = torch.FloatTensor(one_hot_skills).to(agent.device)
+                    _ = agent.policy(next_state, one_hot_skills)#next_state[:,0:-args.num_skills]
+                    next_state_for_disc = agent.policy.flat_state
+                    skills     = torch.LongTensor(skills + args.num_skills*agent_ids ).to(agent.device)
                     logits     = discriminator(next_state_for_disc) 
                     discriminator_loss       = F.cross_entropy(logits, skills)
                     
@@ -144,8 +145,11 @@ for i_episode in itertools.count(1):
         total_numsteps += 1
         if args.diayn:
             with torch.no_grad():
-                skills     = torch.LongTensor([skill]).to(agent1.device)
-                next_state_for_disc = torch.FloatTensor(next_state).unsqueeze(0).to(agent1.device)
+                skills     = torch.LongTensor([skill]).to(agent.device)
+                one_hot_skills = torch.FloatTensor([z_one_hot]).to(agent.device)
+                next_state_for_disc = torch.FloatTensor(next_state).unsqueeze(0).to(agent.device)
+                _ = agent.policy(next_state_for_disc, one_hot_skills)#next_state[:,0:-args.num_skills]
+                next_state_for_disc = agent.policy.flat_state
                 logits     = discriminator(next_state_for_disc)
                 # reward     = (-F.cross_entropy(logits, skills) - np.log(1/args.num_skills + 1e-6) -np.log(1/2. + 1E-6)).item()
                 reward = F.softmax(logits, dim=1).gather(dim=1, index=skills.view(-1,1)).item()
@@ -155,8 +159,7 @@ for i_episode in itertools.count(1):
         # (https://github.com/openai/spinningup/blob/master/spinup/algos/sac/sac.py)
         mask = 1 if episode_steps == env._max_episode_steps else float(not done)
         if args.diayn:
-            next_state = np.concatenate((next_state,z_one_hot))
-            memory.push(state, action, reward, next_state, mask, skill, agent_id)
+            memory.push(state, action, reward, next_state, mask, skill, z_one_hot, agent_id)
         else:    
             memory.push(state, action, reward, next_state, mask) # Append transition to memory
         

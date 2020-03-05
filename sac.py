@@ -8,7 +8,7 @@ from model import GaussianPolicy, QNetwork, DeterministicPolicy
 
 
 class SAC(object):
-    def __init__(self, num_inputs, action_space, args, handicaped=False):
+    def __init__(self, width, height,  action_space, args, handicaped=False):
 
         self.gamma = args.gamma
         self.tau = args.tau
@@ -24,13 +24,14 @@ class SAC(object):
 
         self.device = torch.device("cuda" if args.cuda else "cpu")
 
-        self.critic = QNetwork(num_inputs+self.num_skills, action_space.shape[0], args.hidden_size).to(device=self.device)
+        self.critic = QNetwork(width, height, self.num_skills, action_space.shape[0], args.hidden_size).to(device=self.device)
         self.critic_optim = Adam(self.critic.parameters(), lr=args.lr)
 
-        self.critic_target = QNetwork(num_inputs+self.num_skills, action_space.shape[0], args.hidden_size).to(self.device)
+        self.critic_target = QNetwork(width, height, self.num_skills, action_space.shape[0], args.hidden_size).to(self.device)
         hard_update(self.critic_target, self.critic)
 
         policy_hidden_size = args.hidden_size if not handicaped else int(args.hidden_size/16)
+        # TODO: as opposed to other lines in this file, the policy network is considered to be in the framework of DIAYN. It would be good to harmonize that.
         if self.policy_type == "Gaussian":
             # Target Entropy = −dim(A) (e.g. , -6 for HalfCheetah-v2) as given in the paper
             if self.automatic_entropy_tuning is True:
@@ -38,35 +39,40 @@ class SAC(object):
                 self.log_alpha = torch.zeros(1, requires_grad=True, device=self.device)
                 self.alpha_optim = Adam([self.log_alpha], lr=args.lr)
 
-            self.policy = GaussianPolicy(num_inputs+self.num_skills, action_space.shape[0], policy_hidden_size, action_space).to(self.device)
+            self.policy = GaussianPolicy(width, height, self.num_skills, action_space.shape[0], policy_hidden_size, action_space).to(self.device)
             self.policy_optim = Adam(self.policy.parameters(), lr=args.lr)
 
         else:
+            # TODO: currently no supported
             self.alpha = 0
             self.automatic_entropy_tuning = False
             self.policy = DeterministicPolicy(num_inputs+self.num_skills, action_space.shape[0], policy_hidden_size, action_space).to(self.device)
             self.policy_optim = Adam(self.policy.parameters(), lr=args.lr)
 
-    def select_action(self, state, evaluate=False):
+    def select_action(self, state, skill, evaluate=False):
         state = torch.FloatTensor(state).to(self.device).unsqueeze(0)
+        skill = torch.FloatTensor(skill).to(self.device).unsqueeze(0)
         if evaluate is False:
-            action, _, _ = self.policy.sample(state)
+            action, _, _ = self.policy.sample(state, skill)
         else:
-            _, _, action = self.policy.sample(state)
+            _, _, action = self.policy.sample(state, skill)
         return action.detach().cpu().numpy()[0]
 
     def update_parameters(self, memory, batch_size, updates, discriminator):
         # Sample a batch from memory to update the SAC parameters: critic and actor
-        state_batch, action_batch, reward_batch, next_state_batch, mask_batch, skills, _ = memory.sample(batch_size=batch_size)
+        state_batch, action_batch, reward_batch, next_state_batch, mask_batch, skills, one_hot_skills, _ = memory.sample(batch_size=batch_size)
 
         state_batch = torch.FloatTensor(state_batch).to(self.device)
-        next_state_batch = torch.FloatTensor(next_state_batch).to(self.device)
         action_batch = torch.FloatTensor(action_batch).to(self.device)
+        next_state_batch = torch.FloatTensor(next_state_batch).to(self.device)
+        
         if not self.diayn:
             reward_batch = torch.FloatTensor(reward_batch).to(self.device).unsqueeze(1)
         else:
             skills     = torch.LongTensor(skills).to(self.device)
-            next_state_for_disc = next_state_batch[:,0:-self.num_skills]
+            one_hot_skills = torch.FloatTensor(one_hot_skills).to(self.device)
+            _ = self.policy(next_state_batch, one_hot_skills) # the one_hot_skills is actually not used in the computation graph of flat_state
+            next_state_for_disc = self.policy.flat_state
             logits     = discriminator(next_state_for_disc)
             #reward_batch     = -F.cross_entropy(logits, skills, reduction='none') - np.log(1/self.num_skills + 1e-6) -np.log(1/2. + 1E-6)
             reward_batch = F.softmax(logits, dim=1).gather(dim=1, index=skills.view(-1,1))
@@ -74,23 +80,31 @@ class SAC(object):
         mask_batch = torch.FloatTensor(mask_batch).to(self.device).unsqueeze(1)
 
         with torch.no_grad():
-            next_state_action, next_state_log_pi, _ = self.policy.sample(next_state_batch)
-            qf1_next_target, qf2_next_target = self.critic_target(next_state_batch, next_state_action)
+            if not self.diayn:
+                next_state_action, next_state_log_pi, _ = self.policy.sample(next_state_batch )
+                qf1_next_target, qf2_next_target = self.critic_target(next_state_batch, next_state_action)
+            else:
+                next_state_action, next_state_log_pi, _ = self.policy.sample(next_state_batch, one_hot_skills )
+                qf1_next_target, qf2_next_target = self.critic_target(next_state_batch, one_hot_skills, next_state_action)
+
             min_qf_next_target = torch.min(qf1_next_target, qf2_next_target) - self.alpha * next_state_log_pi
             next_q_value = reward_batch + mask_batch * self.gamma * (min_qf_next_target)
-        qf1, qf2 = self.critic(state_batch, action_batch)  # Two Q-functions to mitigate positive bias in the policy improvement step
+        if not self.diayn:
+            qf1, qf2 = self.critic(state_batch, action_batch)  # Two Q-functions to mitigate positive bias in the policy improvement step
+        else:
+            qf1, qf2 = self.critic(state_batch, one_hot_skills, action_batch)
         qf1_loss = F.mse_loss(qf1, next_q_value)  # JQ = 𝔼(st,at)~D[0.5(Q1(st,at) - r(st,at) - γ(𝔼st+1~p[V(st+1)]))^2]
         qf2_loss = F.mse_loss(qf2, next_q_value)  # JQ = 𝔼(st,at)~D[0.5(Q1(st,at) - r(st,at) - γ(𝔼st+1~p[V(st+1)]))^2]
 
-        pi, log_pi, _ = self.policy.sample(state_batch)
+        pi, log_pi, _ = self.policy.sample(state_batch) if not self.diayn else self.policy.sample(state_batch, one_hot_skills)
 
-        qf1_pi, qf2_pi = self.critic(state_batch, pi)
+        qf1_pi, qf2_pi = self.critic(state_batch, pi) if not self.diayn else  self.critic(state_batch, one_hot_skills, pi)
         min_qf_pi = torch.min(qf1_pi, qf2_pi)
 
         policy_loss = ((self.alpha * log_pi) - min_qf_pi).mean() # Jπ = 𝔼st∼D,εt∼N[α * logπ(f(εt;st)|st) − Q(st,f(εt;st))]
 
         self.critic_optim.zero_grad()
-        qf1_loss.backward()
+        qf1_loss.backward(retain_graph=True) # we retain the graph since there "gate" is a backbone used for qf1 and qf2
         self.critic_optim.step()
 
         self.critic_optim.zero_grad()

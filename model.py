@@ -14,41 +14,43 @@ def weights_init_(m):
         torch.nn.init.constant_(m.bias, 0)
 
 
-class ValueNetwork(nn.Module):
-    def __init__(self, num_inputs, hidden_dim):
-        super(ValueNetwork, self).__init__()
-
-        self.linear1 = nn.Linear(num_inputs, hidden_dim)
-        self.linear2 = nn.Linear(hidden_dim, hidden_dim)
-        self.linear3 = nn.Linear(hidden_dim, 1)
-
-        self.apply(weights_init_)
-
-    def forward(self, state):
-        x = F.relu(self.linear1(state))
-        x = F.relu(self.linear2(x))
-        x = self.linear3(x)
-        return x
 
 
 class QNetwork(nn.Module):
-    def __init__(self, num_inputs, num_actions, hidden_dim):
+    def __init__(self,  width, height, num_skills, num_actions, hidden_dim):
         super(QNetwork, self).__init__()
 
+        self.gate = nn.Sequential(
+            nn.Conv2d(1, 16, kernel_size=3, stride=2, padding=1, bias=False),
+            nn.ReLU(), # 64x64
+            nn.Conv2d(16, 16, kernel_size=3, stride=2, padding=1, bias=False),
+            nn.ReLU(), # 32x32
+            nn.Conv2d(16, 16, kernel_size=3, stride=2, padding=1, bias=False),
+            nn.ReLU(), # 16x16
+            nn.Conv2d(16, 4, kernel_size=3, stride=2, padding=1, bias=False) # 8x8
+            
+        )
+
+        fc_num_inputs = int(width/2**4)*int(height/2**4)*int(4) + num_skills
+
         # Q1 architecture
-        self.linear1 = nn.Linear(num_inputs + num_actions, hidden_dim)
+        self.linear1 = nn.Linear(fc_num_inputs + num_actions, hidden_dim)
         self.linear2 = nn.Linear(hidden_dim, hidden_dim)
         self.linear3 = nn.Linear(hidden_dim, 1)
 
         # Q2 architecture
-        self.linear4 = nn.Linear(num_inputs + num_actions, hidden_dim)
+        self.linear4 = nn.Linear(fc_num_inputs + num_actions, hidden_dim)
         self.linear5 = nn.Linear(hidden_dim, hidden_dim)
         self.linear6 = nn.Linear(hidden_dim, 1)
 
         self.apply(weights_init_)
 
-    def forward(self, state, action):
-        xu = torch.cat([state, action], 1)
+    def forward(self, observation, skill, action):
+
+        state = self.gate(observation)
+        state = state.view(state.shape[0], -1)
+
+        xu = torch.cat([state, skill, action], 1)
         
         x1 = F.relu(self.linear1(xu))
         x1 = F.relu(self.linear2(x1))
@@ -62,10 +64,21 @@ class QNetwork(nn.Module):
 
 
 class GaussianPolicy(nn.Module):
-    def __init__(self, num_inputs, num_actions, hidden_dim, action_space=None):
+    def __init__(self, width, height, num_skills, num_actions, hidden_dim, action_space=None):
         super(GaussianPolicy, self).__init__()
-        
-        self.linear1 = nn.Linear(num_inputs, hidden_dim)
+
+        self.gate = nn.Sequential(
+            nn.Conv2d(1, 16, kernel_size=3, stride=2, padding=1, bias=False),
+            nn.ReLU(), # 64x64
+            nn.Conv2d(16, 16, kernel_size=3, stride=2, padding=1, bias=False),
+            nn.ReLU(), # 32x32
+            nn.Conv2d(16, 16, kernel_size=3, stride=2, padding=1, bias=False),
+            nn.ReLU(), # 16x16
+            nn.Conv2d(16, 4, kernel_size=3, stride=2, padding=1, bias=False) # 8x8
+            
+        )
+        fc_num_inputs = int(width/2**4)*int(height/2**4)*int(4) + num_skills
+        self.linear1 = nn.Linear(fc_num_inputs, hidden_dim)
         self.linear2 = nn.Linear(hidden_dim, hidden_dim)
 
         self.mean_linear = nn.Linear(hidden_dim, num_actions)
@@ -83,7 +96,16 @@ class GaussianPolicy(nn.Module):
             self.action_bias = torch.FloatTensor(
                 (action_space.high + action_space.low) / 2.)
 
-    def forward(self, state):
+        self.flat_state = None
+
+    def forward(self, observation, skill):
+        
+        bs = observation.shape[0]
+        state = self.gate(observation)
+        state = state.view(bs, -1)
+        self.flat_state = state.detach()
+        state = torch.cat([state, skill], 1)
+
         x = F.relu(self.linear1(state))
         x = F.relu(self.linear2(x))
         mean = self.mean_linear(x)
@@ -91,8 +113,8 @@ class GaussianPolicy(nn.Module):
         log_std = torch.clamp(log_std, min=LOG_SIG_MIN, max=LOG_SIG_MAX)
         return mean, log_std
 
-    def sample(self, state):
-        mean, log_std = self.forward(state)
+    def sample(self, observation, skill):
+        mean, log_std = self.forward(observation, skill)
         std = log_std.exp()
         normal = Normal(mean, std)
         x_t = normal.rsample()  # for reparameterization trick (mean + std * N(0,1))
@@ -164,8 +186,32 @@ class Discriminator(nn.Module):
         
         
     def forward(self, state):
+        if len(state.shape) > 2:
+            state = state.view(state.shape[0], -1)
         x = F.relu(self.linear1(state))
         x = F.relu(self.linear2(x))
         x = self.linear3(x)
         
         return x
+
+
+# TEST
+# num_skills = 8
+# num_actions = 2
+# hidden_size = 64
+# width, height = 128, 128
+# net = GaussianPolicy(width, height, num_skills, num_actions, hidden_size).cuda()
+# obs = torch.rand((1,1,width, height)).cuda()
+# skill = torch.tensor([[1,0,0,0, 0,0,0,0]], dtype=torch.float32).cuda()
+
+
+
+# y = net(obs, skill)
+# value = net.flat_state
+
+# D = Discriminator(256, num_skills, hidden_size).cuda()
+# d = D(value)
+
+# Q = QNetwork(width, height, num_skills, num_actions, hidden_size).cuda()
+# action = torch.rand(1,num_actions).cuda()
+# q = Q(obs, skill, action)
